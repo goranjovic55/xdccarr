@@ -281,8 +281,9 @@ async def api_search(q: str = Query(...), limit: int = Query(100)):
 
 @app.post("/api/grab")
 async def api_grab(item: dict):
+    print(f"GRAB received: {item}")
     """Trigger XDCC download from WebUI"""
-    server = item.get("server", "")
+    server = item.get("server", item.get("network", ""))
     channel = item.get("channel", "")
     bot = item.get("bot", "")
     pack = item.get("pack", "")
@@ -321,7 +322,7 @@ async def grab(id: str = Query(..., description="Result ID to grab")):
     item = _result_cache[id]
     
     # Build irssi command
-    server = item.get("server", "")
+    server = item.get("server", item.get("network", ""))
     channel = item.get("channel", "")
     bot = item.get("bot", "")
     pack = item.get("pack", "")
