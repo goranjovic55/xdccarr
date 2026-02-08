@@ -281,10 +281,29 @@ async def api_search(q: str = Query(...), limit: int = Query(100)):
 
 @app.post("/api/grab")
 async def api_grab(item: dict):
-    """Trigger XDCC download"""
-    # TODO: Integrate with irssi/autodl
-    return {"status": "queued", "item": item}
-
+    """Trigger XDCC download from WebUI"""
+    server = item.get("server", "")
+    channel = item.get("channel", "")
+    bot = item.get("bot", "")
+    pack = item.get("pack", "")
+    filename = item.get("title", item.get("filename", ""))
+    
+    if not all([bot, pack]):
+        return {"status": "error", "message": "Missing bot or pack number"}
+    
+    # Write to queue file
+    queue_file = Path("/app/data/xdcc_queue.txt")
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(queue_file, "a") as f:
+        f.write(f"{server}|{channel}|{bot}|{pack}|{filename}\n")
+    
+    xdcc_cmd = f"/msg {bot} xdcc send #{pack}"
+    return {
+        "status": "queued",
+        "message": f"XDCC download queued: {bot} #{pack}",
+        "command": xdcc_cmd
+    }
 
 @app.get("/grab")
 async def grab(id: str = Query(..., description="Result ID to grab")):
