@@ -22,6 +22,10 @@ _result_cache = {}
 static_path = Path(__file__).parent.parent / "static"
 if static_path.exists() and (static_path / "index.html").exists():
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+    # Also mount /assets for Vite build output
+    assets_path = static_path / "assets"
+    if assets_path.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
 
 CATEGORIES = {
     "Movies": 2000, "Movies/HD": 2040, "Movies/UHD": 2045, "Movies/BluRay": 2050,
