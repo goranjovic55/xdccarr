@@ -15,6 +15,9 @@ from src.sources import search_all_sources, SOURCES
 
 app = FastAPI(title="XDCCarr", version="0.2.0")
 
+# In-memory cache for grab lookups - define BEFORE it's used
+_result_cache = {}
+
 # Serve static files for WebUI
 static_path = Path(__file__).parent.parent / "static"
 if static_path.exists() and (static_path / "index.html").exists():
@@ -94,112 +97,66 @@ def detect_category(filename: str) -> int:
     
     return 7000  # Other
 
-async def search_xdcc(query: str, limit: int = 100) -> list:
-    """Search xdcc.eu and parse results"""
+
+def transform_results(raw_results: list, base_url: str = "http://localhost:9117") -> list:
+    """Transform raw source results into Torznab-compatible format"""
     results = []
     
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            url = f"https://www.xdcc.eu/search.php?searchkey={query}"
-            resp = await client.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+    for r in raw_results:
+        try:
+            filename = r.get('filename', '')
+            if not filename:
+                continue
+            
+            server = r.get('server', r.get('network', ''))
+            channel = r.get('channel', '')
+            bot = r.get('bot', '')
+            pack = r.get('pack', '')
+            
+            # Generate unique ID
+            uid = hashlib.md5(f"{server}{channel}{bot}{pack}".encode()).hexdigest()[:16]
+            
+            # Store in cache for grab endpoint
+            _result_cache[uid] = {
+                "server": server,
+                "channel": channel, 
+                "bot": bot,
+                "pack": pack,
+                "filename": filename
+            }
+            
+            # Use HTTP grab URL for Prowlarr compatibility
+            grab_url = f"{base_url}/grab?id={uid}"
+            
+            results.append({
+                "id": uid,
+                "title": filename,
+                "size": parse_size(r.get('size_str', '0')),
+                "size_str": r.get('size_str', ''),
+                "network": r.get('network', ''),
+                "server": server,
+                "channel": channel,
+                "bot": bot,
+                "pack": pack,
+                "category": detect_category(filename),
+                "link": grab_url,
+                "pubdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
             })
-            
-            if resp.status_code != 200:
-                return results
-            
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            
-            # Find the results table
-            table = soup.find('table', {'id': 'packets'})
-            if not table:
-                return results
-            
-            rows = table.find_all('tr')[1:]  # Skip header
-            
-            for row in rows[:limit]:
-                cols = row.find_all('td')
-                if len(cols) < 7:
-                    continue
-                
-                try:
-                    # Column mapping for xdcc.eu:
-                    # 0: Network, 1: Channel info, 2: Bot, 3: Pack, 4: Downloads, 5: Size, 6: Filename
-                    network = cols[0].get_text(strip=True)
-                    
-                    # Extract IRC details from channel column data attributes
-                    channel_td = cols[1]
-                    info_link = channel_td.find('a', {'class': 'info'})
-                    
-                    if info_link:
-                        server = info_link.get('data-s', network)
-                        channel = info_link.get('data-c', '')
-                        xdcc_cmd = info_link.get('data-p', '')
-                    else:
-                        server = network
-                        channel = channel_td.get_text(strip=True).split()[0] if channel_td.get_text() else ''
-                        xdcc_cmd = ''
-                    
-                    bot = cols[2].get_text(strip=True)
-                    pack = cols[3].get_text(strip=True).replace('#', '')
-                    # cols[4] is download count, skip
-                    size_str = cols[5].get_text(strip=True)
-                    
-                    # Filename - strip hit highlighting
-                    filename_td = cols[6]
-                    for span in filename_td.find_all('span', {'class': 'hit'}):
-                        span.unwrap()
-                    filename = filename_td.get_text(strip=True)
-                    
-                    if not filename:
-                        continue
-                    
-                    # Generate unique ID
-                    uid = hashlib.md5(f"{server}{channel}{bot}{pack}".encode()).hexdigest()[:16]
-                    
-                    # Build xdcc:// link
-                    # Store in cache for grab endpoint
-                    _result_cache[uid] = {
-                        "server": server,
-                        "channel": channel, 
-                        "bot": bot,
-                        "pack": pack,
-                        "filename": filename
-                    }
-                    # Use HTTP grab URL for Prowlarr compatibility
-                    grab_url = f"http://localhost:9117/grab?id={uid}"
-                    
-                    results.append({
-                        "id": uid,
-                        "title": filename,
-                        "size": parse_size(size_str),
-                        "size_str": size_str,
-                        "network": network,
-                        "server": server,
-                        "channel": channel,
-                        "bot": bot,
-                        "pack": pack,
-                        "xdcc_cmd": xdcc_cmd,
-                        "category": detect_category(filename),
-                        "link": grab_url,
-                        "pubdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-                    })
-                    
-                except Exception as e:
-                    continue
-                    
-    except Exception as e:
-        print(f"Search error: {e}")
+        except Exception as e:
+            continue
     
     return results
+
 
 def generate_torznab_xml(results: list, title: str = "XDCCarr") -> str:
     """Generate Torznab-compatible XML response"""
     items = []
     for r in results:
+        # Escape XML special characters
+        title_text = str(r.get('title', '')).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         items.append(f"""
         <item>
-            <title>{r['title']}</title>
+            <title>{title_text}</title>
             <guid>{r['id']}</guid>
             <link>{r['link']}</link>
             <size>{r['size']}</size>
@@ -281,7 +238,9 @@ async def api(
     t: str = Query("search", description="API function"),
     q: Optional[str] = Query(None, description="Search query"),
     cat: Optional[str] = Query(None, description="Category filter"),
-    limit: int = Query(100, description="Result limit")
+    limit: int = Query(100, description="Result limit"),
+    extended: int = Query(0, description="Extended info"),
+    offset: int = Query(0, description="Result offset")
 ):
     """Torznab-compatible API endpoint"""
     
@@ -292,7 +251,11 @@ async def api(
         if not q:
             return Response(content=generate_torznab_xml([]), media_type="application/xml")
         
-        results = await search_all_sources(q, limit)
+        # Get raw results from sources
+        raw_results = await search_all_sources(q, limit if limit > 0 else 100)
+        
+        # Transform into Torznab-compatible format
+        results = transform_results(raw_results)
         
         # Filter by category if specified
         if cat:
@@ -309,8 +272,8 @@ async def api(
 @app.get("/api/search")
 async def api_search(q: str = Query(...), limit: int = Query(100)):
     """JSON search endpoint for WebUI"""
-    results = await search_all_sources(q, limit)
-    return results
+    raw_results = await search_all_sources(q, limit)
+    return transform_results(raw_results)
 
 @app.post("/api/grab")
 async def api_grab(item: dict):
@@ -318,12 +281,6 @@ async def api_grab(item: dict):
     # TODO: Integrate with irssi/autodl
     return {"status": "queued", "item": item}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9117)
-
-# In-memory cache for grab lookups
-_result_cache = {}
 
 @app.get("/grab")
 async def grab(id: str = Query(..., description="Result ID to grab")):
@@ -331,10 +288,12 @@ async def grab(id: str = Query(..., description="Result ID to grab")):
     Trigger XDCC download for a result.
     Called by Prowlarr when user clicks download.
     """
-    import subprocess
-    
     if id not in _result_cache:
-        return {"status": "error", "message": "Result not found or expired"}
+        return Response(
+            content='{"status": "error", "message": "Result not found or expired. Please search again."}',
+            media_type="application/json",
+            status_code=404
+        )
     
     item = _result_cache[id]
     
@@ -345,22 +304,38 @@ async def grab(id: str = Query(..., description="Result ID to grab")):
     pack = item.get("pack", "")
     
     if not all([server, bot, pack]):
-        return {"status": "error", "message": "Missing XDCC details"}
+        return Response(
+            content='{"status": "error", "message": "Missing XDCC details"}',
+            media_type="application/json",
+            status_code=400
+        )
     
-    # Create XDCC command file for irssi
+    # Create XDCC command
     xdcc_cmd = f"/msg {bot} xdcc send #{pack}"
     
-    # Option 1: Write to blackhole as .xdcc file (custom handler)
-    # Option 2: Trigger via SSH to DietPi irssi
-    # Option 3: Use HTTP API if autodl-irssi has one
+    # Write to queue file for processing
+    queue_file = Path("/app/config/xdcc_queue.txt")
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # For now, write to a queue file that the daemon can pick up
-    queue_file = "/tmp/xdcc_queue.txt"
     with open(queue_file, "a") as f:
         f.write(f"{server}|{channel}|{bot}|{pack}|{item.get('filename', '')}\n")
     
     return {
         "status": "queued",
         "message": f"XDCC download queued: {bot} #{pack}",
-        "details": item
+        "details": item,
+        "command": xdcc_cmd
     }
+
+
+@app.get("/sources")
+async def list_sources():
+    """List configured XDCC sources"""
+    return {
+        "sources": [{"name": s.name, "url": s.base_url} for s in SOURCES]
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9117)
