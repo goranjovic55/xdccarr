@@ -1,6 +1,6 @@
 services:
   xdccarr:
-    image: ghcr.io/gfrancini/xdccarr:latest
+    image: ghcr.io/goranjovic55/xdccarr:latest
     container_name: xdccarr
     restart: unless-stopped
     ports:
@@ -9,7 +9,7 @@ services:
       - ./config:/app/config
       - ./logs:/app/logs
     environment:
-      - TZ=UTC
+      - TZ=Europe/Zagreb
       - PUID=1000
       - PGID=1000
     healthcheck:
