@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import os
+from src.sources import search_all_sources, SOURCES
+
 
 app = FastAPI(title="XDCCarr", version="0.2.0")
 
@@ -281,7 +283,7 @@ async def api(
         if not q:
             return Response(content=generate_torznab_xml([]), media_type="application/xml")
         
-        results = await search_xdcc(q, limit)
+        results = await search_all_sources(q, limit)
         
         # Filter by category if specified
         if cat:
@@ -298,7 +300,7 @@ async def api(
 @app.get("/api/search")
 async def api_search(q: str = Query(...), limit: int = Query(100)):
     """JSON search endpoint for WebUI"""
-    results = await search_xdcc(q, limit)
+    results = await search_all_sources(q, limit)
     return results
 
 @app.post("/api/grab")
