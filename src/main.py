@@ -1,66 +1,217 @@
-"""
-XDCCarr - XDCC Indexer for *arr ecosystem
-Provides Torznab-compatible API for XDCC content
-Supports: Movies, TV, Music, XXX, and all other XDCC content
-"""
+"""XDCCarr - XDCC Indexer for *arr ecosystem"""
 from fastapi import FastAPI, Query, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import os
+from fastapi.responses import HTMLResponse, FileResponse
 import httpx
 from bs4 import BeautifulSoup
+import hashlib
 import re
 from datetime import datetime
-import hashlib
+from pathlib import Path
+from typing import Optional
+import os
 
-app = FastAPI(
-    title="XDCCarr",
-    description="XDCC Indexer for Prowlarr/*arr ecosystem",
-    version="0.2.0"
-)
+app = FastAPI(title="XDCCarr", version="0.2.0")
 
-# Torznab category mapping
+# Serve static files for WebUI
+static_path = Path(__file__).parent.parent / "static"
+if static_path.exists() and (static_path / "index.html").exists():
+    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
 CATEGORIES = {
-    2000: "Movies",
-    2010: "Movies/Foreign",
-    2020: "Movies/Other",
-    2030: "Movies/SD",
-    2040: "Movies/HD",
-    2045: "Movies/UHD",
-    2050: "Movies/BluRay",
-    2060: "Movies/3D",
-    3000: "Audio",
-    3010: "Audio/MP3",
-    3020: "Audio/Video",
-    3030: "Audio/Audiobook",
-    3040: "Audio/Lossless",
-    5000: "TV",
-    5010: "TV/WEB-DL",
-    5020: "TV/Foreign",
-    5030: "TV/SD",
-    5040: "TV/HD",
-    5045: "TV/UHD",
-    5050: "TV/Other",
-    5060: "TV/Sport",
-    5070: "TV/Anime",
-    5080: "TV/Documentary",
-    6000: "XXX",
-    6010: "XXX/DVD",
-    6020: "XXX/WMV",
-    6030: "XXX/XviD",
-    6040: "XXX/x264",
-    6050: "XXX/Pack",
-    6060: "XXX/ImageSet",
-    6070: "XXX/Other",
-    7000: "Other",
-    7010: "Other/Misc",
-    7020: "Other/Ebook",
-    7030: "Other/Comics",
-    8000: "Games",
+    "Movies": 2000, "Movies/HD": 2040, "Movies/UHD": 2045, "Movies/BluRay": 2050,
+    "Audio": 3000, "Audio/MP3": 3010, "Audio/Lossless": 3040,
+    "TV": 5000, "TV/HD": 5040, "TV/UHD": 5045, "TV/Anime": 5070,
+    "XXX": 6000, "XXX/x264": 6040, "XXX/Other": 6070,
+    "Other": 7000, "Other/Ebook": 7020,
+    "Games": 8000,
 }
 
-# Torznab capabilities XML
-CAPABILITIES_XML = """<?xml version="1.0" encoding="UTF-8"?>
+def parse_size(size_str: str) -> int:
+    """Convert size string like '3.5G' to bytes"""
+    if not size_str:
+        return 0
+    size_str = size_str.strip().upper()
+    multipliers = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
+    for suffix, mult in multipliers.items():
+        if size_str.endswith(suffix):
+            try:
+                return int(float(size_str[:-1]) * mult)
+            except ValueError:
+                return 0
+    try:
+        return int(size_str)
+    except ValueError:
+        return 0
+
+def detect_category(filename: str) -> int:
+    """Detect category from filename"""
+    fn = filename.lower()
+    
+    # XXX detection
+    if any(x in fn for x in ['xxx', 'porn', 'adult', 'sex', 'brazzers', 'bangbros', 'naughty']):
+        if '264' in fn or 'hevc' in fn or 'x265' in fn:
+            return 6040
+        return 6070
+    
+    # TV detection
+    if re.search(r's\d{1,2}e\d{1,2}', fn) or re.search(r'\d{1,2}x\d{1,2}', fn):
+        if any(x in fn for x in ['anime', 'horriblesubs', 'erai', 'subsplease']):
+            return 5070
+        if any(x in fn for x in ['2160p', '4k', 'uhd']):
+            return 5045
+        if any(x in fn for x in ['1080p', '720p', 'hdtv', 'webrip', 'web-dl']):
+            return 5040
+        return 5000
+    
+    # Audio detection
+    if any(x in fn for x in ['.flac', '.wav', '.alac', 'lossless']):
+        return 3040
+    if any(x in fn for x in ['.mp3', '.aac', '.m4a', 'album', 'discography']):
+        return 3010
+    if any(x in fn for x in ['music', 'soundtrack', 'ost']):
+        return 3000
+    
+    # Games detection
+    if any(x in fn for x in ['fitgirl', 'codex', 'skidrow', 'plaza', 'gog', '.iso', 'repack']):
+        return 8000
+    
+    # Ebook detection
+    if any(x in fn for x in ['.epub', '.mobi', '.pdf', 'ebook', '.azw']):
+        return 7020
+    
+    # Movies (default for video)
+    if any(x in fn for x in ['2160p', '4k', 'uhd']):
+        return 2045
+    if 'bluray' in fn or 'blu-ray' in fn:
+        return 2050
+    if any(x in fn for x in ['1080p', '720p', 'brrip', 'dvdrip', 'webrip']):
+        return 2040
+    if any(x in fn for x in ['.mkv', '.mp4', '.avi']):
+        return 2000
+    
+    return 7000  # Other
+
+async def search_xdcc(query: str, limit: int = 100) -> list:
+    """Search xdcc.eu and parse results"""
+    results = []
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            url = f"https://www.xdcc.eu/search.php?searchkey={query}"
+            resp = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+            })
+            
+            if resp.status_code != 200:
+                return results
+            
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Find the results table
+            table = soup.find('table', {'id': 'packets'})
+            if not table:
+                return results
+            
+            rows = table.find_all('tr')[1:]  # Skip header
+            
+            for row in rows[:limit]:
+                cols = row.find_all('td')
+                if len(cols) < 7:
+                    continue
+                
+                try:
+                    # Column mapping for xdcc.eu:
+                    # 0: Network, 1: Channel info, 2: Bot, 3: Pack, 4: Downloads, 5: Size, 6: Filename
+                    network = cols[0].get_text(strip=True)
+                    
+                    # Extract IRC details from channel column data attributes
+                    channel_td = cols[1]
+                    info_link = channel_td.find('a', {'class': 'info'})
+                    
+                    if info_link:
+                        server = info_link.get('data-s', network)
+                        channel = info_link.get('data-c', '')
+                        xdcc_cmd = info_link.get('data-p', '')
+                    else:
+                        server = network
+                        channel = channel_td.get_text(strip=True).split()[0] if channel_td.get_text() else ''
+                        xdcc_cmd = ''
+                    
+                    bot = cols[2].get_text(strip=True)
+                    pack = cols[3].get_text(strip=True).replace('#', '')
+                    # cols[4] is download count, skip
+                    size_str = cols[5].get_text(strip=True)
+                    
+                    # Filename - strip hit highlighting
+                    filename_td = cols[6]
+                    for span in filename_td.find_all('span', {'class': 'hit'}):
+                        span.unwrap()
+                    filename = filename_td.get_text(strip=True)
+                    
+                    if not filename:
+                        continue
+                    
+                    # Generate unique ID
+                    uid = hashlib.md5(f"{server}{channel}{bot}{pack}".encode()).hexdigest()[:16]
+                    
+                    # Build xdcc:// link
+                    xdcc_link = f"xdcc://{server}/{channel}/{bot}/{pack}"
+                    
+                    results.append({
+                        "id": uid,
+                        "title": filename,
+                        "size": parse_size(size_str),
+                        "size_str": size_str,
+                        "network": network,
+                        "server": server,
+                        "channel": channel,
+                        "bot": bot,
+                        "pack": pack,
+                        "xdcc_cmd": xdcc_cmd,
+                        "category": detect_category(filename),
+                        "link": xdcc_link,
+                        "pubdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+                    })
+                    
+                except Exception as e:
+                    continue
+                    
+    except Exception as e:
+        print(f"Search error: {e}")
+    
+    return results
+
+def generate_torznab_xml(results: list, title: str = "XDCCarr") -> str:
+    """Generate Torznab-compatible XML response"""
+    items = []
+    for r in results:
+        items.append(f"""
+        <item>
+            <title>{r['title']}</title>
+            <guid>{r['id']}</guid>
+            <link>{r['link']}</link>
+            <size>{r['size']}</size>
+            <pubDate>{r['pubdate']}</pubDate>
+            <category>{r['category']}</category>
+            <torznab:attr name="category" value="{r['category']}" />
+            <torznab:attr name="size" value="{r['size']}" />
+            <enclosure url="{r['link']}" length="{r['size']}" type="application/x-xdcc" />
+        </item>""")
+    
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+    <channel>
+        <title>{title}</title>
+        <description>XDCC Indexer</description>
+        <atom:link href="http://localhost:9117/api" rel="self" type="application/rss+xml" />
+        {"".join(items)}
+    </channel>
+</rss>"""
+
+def generate_caps_xml() -> str:
+    """Generate Torznab capabilities XML"""
+    return """<?xml version="1.0" encoding="UTF-8"?>
 <caps>
     <server title="XDCCarr" />
     <limits default="100" max="500" />
@@ -97,242 +248,64 @@ CAPABILITIES_XML = """<?xml version="1.0" encoding="UTF-8"?>
     </categories>
 </caps>"""
 
-async def search_xdcc(query: str, categories: list = None) -> list:
-    """Search xdcc.eu for content"""
-    results = []
-    search_url = f"https://xdcc.eu/search.php?searchkey={query.replace(' ', '+')}"
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(search_url, timeout=30.0, follow_redirects=True)
-            soup = BeautifulSoup(response.text, 'lxml')
-            
-            # Parse table rows
-            rows = soup.select('table tr')[1:]  # Skip header
-            for row in rows[:100]:  # Limit results
-                cols = row.find_all('td')
-                if len(cols) >= 6:
-                    try:
-                        network = cols[0].get_text(strip=True)
-                        channel = cols[1].get_text(strip=True)
-                        bot = cols[2].get_text(strip=True)
-                        pack = cols[3].get_text(strip=True).replace('#', '')
-                        size_text = cols[4].get_text(strip=True)
-                        filename = cols[5].get_text(strip=True)
-                        
-                        # Parse size
-                        size_bytes = parse_size(size_text)
-                        
-                        # Guess category
-                        cat = guess_category(filename, channel)
-                        
-                        # Filter by category if specified
-                        if categories:
-                            cat_base = (cat // 1000) * 1000
-                            if cat not in categories and cat_base not in categories:
-                                continue
-                        
-                        # Generate unique ID
-                        uid = hashlib.md5(f"{network}{channel}{bot}{pack}".encode()).hexdigest()[:16]
-                        
-                        results.append({
-                            'id': uid,
-                            'title': filename,
-                            'size': size_bytes,
-                            'network': network,
-                            'channel': channel,
-                            'bot': bot,
-                            'pack': pack,
-                            'category': cat
-                        })
-                    except Exception:
-                        continue
-        except Exception as e:
-            print(f"Search error: {e}")
-    
-    return results
-
-def parse_size(size_text: str) -> int:
-    """Convert size string to bytes"""
-    size_text = size_text.upper().strip()
-    multipliers = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4}
-    
-    match = re.match(r'([\d.]+)\s*([KMGT])?B?', size_text)
-    if match:
-        value = float(match.group(1))
-        unit = match.group(2) or ''
-        return int(value * multipliers.get(unit, 1))
-    return 0
-
-def guess_category(filename: str, channel: str = "") -> int:
-    """Guess category from filename and channel"""
-    fn = filename.lower()
-    ch = channel.lower()
-    
-    # XXX detection
-    xxx_keywords = ['xxx', 'porn', 'adult', '18+', 'sexart', 'vixen', 'tushy', 
-                    'blacked', 'bangbros', 'brazzers', 'naughty', 'milf', 'jav']
-    if any(kw in fn or kw in ch for kw in xxx_keywords):
-        if '1080p' in fn or 'x264' in fn or 'x265' in fn:
-            return 6040  # XXX/x264
-        return 6070  # XXX/Other
-    
-    # Music detection
-    music_keywords = ['flac', 'mp3', 'album', 'discography', '320kbps', 'lossless']
-    music_extensions = ['.flac', '.mp3', '.m4a', '.ogg', '.wav']
-    if any(kw in fn for kw in music_keywords) or any(fn.endswith(ext) for ext in music_extensions):
-        if 'flac' in fn or 'lossless' in fn:
-            return 3040  # Audio/Lossless
-        return 3010  # Audio/MP3
-    
-    # Anime detection
-    if 'anime' in ch or any(g in fn for g in ['[subsplease]', '[erai-raws]', '[horriblesubs]', 'nyaa']):
-        return 5070  # TV/Anime
-    
-    # TV detection
-    if re.search(r's\d{2}e\d{2}|season|episode|\d+x\d+', fn):
-        if '2160p' in fn or '4k' in fn:
-            return 5045  # TV/UHD
-        if '1080p' in fn or '720p' in fn:
-            return 5040  # TV/HD
-        return 5030  # TV/SD
-    
-    # Games detection
-    game_keywords = ['repack', 'gog', 'fitgirl', 'codex', 'plaza', 'skidrow']
-    if any(kw in fn for kw in game_keywords):
-        return 8000  # Games
-    
-    # Ebooks
-    if any(fn.endswith(ext) for ext in ['.epub', '.mobi', '.pdf', '.azw3']):
-        return 7020  # Other/Ebook
-    
-    # Movies (default for video content)
-    if '2160p' in fn or '4k' in fn:
-        return 2045  # Movies/UHD
-    if 'bluray' in fn or 'blu-ray' in fn:
-        return 2050  # Movies/BluRay
-    if '1080p' in fn or '720p' in fn:
-        return 2040  # Movies/HD
-    
-    return 2000  # Movies (default)
-
-def results_to_torznab_xml(results: list) -> str:
-    """Convert results to Torznab XML format"""
-    items = []
-    for r in results:
-        # Create XDCC download link
-        link = f"xdcc://{r['network']}/{r['channel']}/{r['bot']}/{r['pack']}"
-        
-        # Escape XML special characters
-        title = r['title'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        item = f"""
-        <item>
-            <title>{title}</title>
-            <guid>{r['id']}</guid>
-            <link>{link}</link>
-            <size>{r['size']}</size>
-            <pubDate>{datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S +0000')}</pubDate>
-            <category>{r['category']}</category>
-            <torznab:attr name="category" value="{r['category']}" />
-            <torznab:attr name="size" value="{r['size']}" />
-            <enclosure url="{link}" length="{r['size']}" type="application/x-xdcc" />
-        </item>"""
-        items.append(item)
-    
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
-    <channel>
-        <title>XDCCarr</title>
-        <description>XDCC Indexer</description>
-        <atom:link href="http://localhost:9117/api" rel="self" type="application/rss+xml" />
-        {''.join(items)}
-    </channel>
-</rss>"""
-
 @app.get("/")
 async def root():
+    """Root endpoint - serve WebUI or API info"""
+    index_file = static_path / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "name": "XDCCarr",
         "version": "0.2.0",
         "status": "ok",
-        "categories": ["Movies", "TV", "Music", "XXX", "Games", "Other"]
+        "categories": list(CATEGORIES.keys())[:6]
     }
-
-@app.get("/api")
-async def torznab_api(
-    t: str = Query(..., description="Action type"),
-    q: str = Query(None, description="Search query"),
-    apikey: str = Query(None, description="API key"),
-    cat: str = Query(None, description="Categories (comma-separated)"),
-    season: str = Query(None, description="Season number"),
-    ep: str = Query(None, description="Episode number"),
-    artist: str = Query(None, description="Artist name"),
-    album: str = Query(None, description="Album name"),
-    author: str = Query(None, description="Book author"),
-    title: str = Query(None, description="Book title")
-):
-    """Torznab-compatible API endpoint"""
-    
-    if t == "caps":
-        return Response(content=CAPABILITIES_XML, media_type="application/xml")
-    
-    # Parse categories
-    categories = None
-    if cat:
-        try:
-            categories = [int(c) for c in cat.split(',')]
-        except ValueError:
-            pass
-    
-    # Build search query based on type
-    query_parts = []
-    
-    if q:
-        query_parts.append(q)
-    
-    if t == "tvsearch":
-        if season and ep:
-            query_parts.append(f"S{int(season):02d}E{int(ep):02d}")
-        elif season:
-            query_parts.append(f"S{int(season):02d}")
-    
-    elif t == "music":
-        if artist:
-            query_parts.append(artist)
-        if album:
-            query_parts.append(album)
-    
-    elif t == "book":
-        if author:
-            query_parts.append(author)
-        if title:
-            query_parts.append(title)
-    
-    query = " ".join(query_parts)
-    
-    if not query.strip():
-        return Response(content=results_to_torznab_xml([]), media_type="application/xml")
-    
-    results = await search_xdcc(query, categories)
-    return Response(content=results_to_torznab_xml(results), media_type="application/xml")
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# Serve frontend static files
-static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-if os.path.exists(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+@app.get("/api")
+async def api(
+    t: str = Query("search", description="API function"),
+    q: Optional[str] = Query(None, description="Search query"),
+    cat: Optional[str] = Query(None, description="Category filter"),
+    limit: int = Query(100, description="Result limit")
+):
+    """Torznab-compatible API endpoint"""
+    
+    if t == "caps":
+        return Response(content=generate_caps_xml(), media_type="application/xml")
+    
+    if t in ["search", "tvsearch", "movie", "music"]:
+        if not q:
+            return Response(content=generate_torznab_xml([]), media_type="application/xml")
+        
+        results = await search_xdcc(q, limit)
+        
+        # Filter by category if specified
+        if cat:
+            try:
+                cat_ids = [int(c) for c in cat.split(",")]
+                results = [r for r in results if r["category"] in cat_ids or r["category"] // 1000 * 1000 in cat_ids]
+            except ValueError:
+                pass
+        
+        return Response(content=generate_torznab_xml(results), media_type="application/xml")
+    
+    return Response(content=generate_caps_xml(), media_type="application/xml")
 
-@app.get("/")
-async def serve_frontend():
-    """Serve the frontend UI"""
-    index_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    return {"message": "XDCCarr API", "docs": "/docs"}
+@app.get("/api/search")
+async def api_search(q: str = Query(...), limit: int = Query(100)):
+    """JSON search endpoint for WebUI"""
+    results = await search_xdcc(q, limit)
+    return results
+
+@app.post("/api/grab")
+async def api_grab(item: dict):
+    """Trigger XDCC download"""
+    # TODO: Integrate with irssi/autodl
+    return {"status": "queued", "item": item}
 
 if __name__ == "__main__":
     import uvicorn
