@@ -318,7 +318,7 @@ async def grab(id: str = Query(..., description="Result ID to grab")):
     xdcc_cmd = f"/msg {bot} xdcc send #{pack}"
     
     # Write to queue file for processing
-    queue_file = Path("/app/config/xdcc_queue.txt")
+    queue_file = Path("/app/data/xdcc_queue.txt")
     queue_file.parent.mkdir(parents=True, exist_ok=True)
     
     with open(queue_file, "a") as f:
