@@ -1,0 +1,15 @@
+services:
+  xdccarr:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: xdccarr-dev
+    restart: unless-stopped
+    ports:
+      - "9117:9117"
+    volumes:
+      - ./src:/app/src:ro
+      - ./static:/app/static:ro
+      - ./config:/app/config
+    environment:
+      - TZ=UTC

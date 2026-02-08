@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-arr-bg text-arr-text;
+  font-family: 'Segoe UI', 'Open Sans', sans-serif;
+}
+
+/* *arr-style scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-arr-bg;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-arr-border rounded;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-arr-text-muted;
+}
+
+/* *arr-style buttons */
+.btn-arr {
+  @apply px-4 py-2 rounded font-medium transition-colors;
+}
+.btn-arr-primary {
+  @apply btn-arr bg-arr-accent text-white hover:bg-arr-accent-hover;
+}
+.btn-arr-secondary {
+  @apply btn-arr bg-arr-bg-alt border border-arr-border hover:bg-arr-border;
+}
+
+/* *arr-style table */
+.table-arr {
+  @apply w-full;
+}
+.table-arr th {
+  @apply text-left px-4 py-3 bg-arr-sidebar text-arr-text-muted text-sm font-medium border-b border-arr-border;
+}
+.table-arr td {
+  @apply px-4 py-3 border-b border-arr-border;
+}
+.table-arr tr:hover {
+  @apply bg-arr-bg-alt;
+}
+
+/* *arr-style cards */
+.card-arr {
+  @apply bg-arr-bg-alt rounded-lg border border-arr-border p-4;
+}

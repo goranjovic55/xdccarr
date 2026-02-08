@@ -1,0 +1,19 @@
+services:
+  xdccarr:
+    image: ghcr.io/gfrancini/xdccarr:latest
+    container_name: xdccarr
+    restart: unless-stopped
+    ports:
+      - "9117:9117"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    environment:
+      - TZ=UTC
+      - PUID=1000
+      - PGID=1000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9117/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
