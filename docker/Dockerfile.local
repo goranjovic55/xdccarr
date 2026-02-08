@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir fastapi uvicorn httpx beautifulsoup4
+
+COPY src/ ./src/
+COPY static/ ./static/
+
+# Create data directory for persistence
+RUN mkdir -p /app/data
+
+EXPOSE 9117
+
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "9117"]

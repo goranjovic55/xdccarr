@@ -339,3 +339,133 @@ async def list_sources():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9117)
+
+# ============== ACTIVITY HISTORY ==============
+from datetime import datetime
+import json
+from pathlib import Path
+
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(exist_ok=True)
+
+HISTORY_FILE = DATA_DIR / "history.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+STATS_FILE = DATA_DIR / "stats.json"
+
+def load_json(path: Path, default=None):
+    if default is None:
+        default = []
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except:
+        pass
+    return default
+
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2))
+
+# Activity History
+@app.get("/api/history")
+async def get_history(limit: int = Query(100)):
+    """Get recent activity/search history"""
+    history = load_json(HISTORY_FILE, [])
+    return history[:limit]
+
+@app.post("/api/history")
+async def add_history(entry: dict):
+    """Add entry to history"""
+    history = load_json(HISTORY_FILE, [])
+    entry["timestamp"] = datetime.utcnow().isoformat()
+    history.insert(0, entry)
+    history = history[:1000]  # Keep last 1000
+    save_json(HISTORY_FILE, history)
+    return {"status": "ok"}
+
+@app.delete("/api/history")
+async def clear_history():
+    """Clear all history"""
+    save_json(HISTORY_FILE, [])
+    return {"status": "cleared"}
+
+# Settings
+DEFAULT_SETTINGS = {
+    "sources": {
+        "xdcc.eu": {"enabled": True, "priority": 1},
+        "xdcc.it": {"enabled": True, "priority": 2},
+    },
+    "search": {
+        "defaultLimit": 100,
+        "timeout": 30,
+    },
+    "ui": {
+        "theme": "dark",
+        "resultsPerPage": 50,
+    }
+}
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get current settings"""
+    settings = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    return settings
+
+@app.put("/api/settings")
+async def update_settings(settings: dict):
+    """Update settings"""
+    current = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    current.update(settings)
+    save_json(SETTINGS_FILE, current)
+    return {"status": "ok", "settings": current}
+
+# Stats
+@app.get("/api/stats")
+async def get_stats():
+    """Get usage statistics"""
+    stats = load_json(STATS_FILE, {
+        "totalSearches": 0,
+        "totalGrabs": 0,
+        "searchesBySource": {},
+        "topSearches": [],
+        "grabsByCategory": {},
+        "lastUpdated": None
+    })
+    return stats
+
+def update_stats(search_term: str = None, source: str = None, grab: bool = False, category: int = None):
+    """Update statistics"""
+    stats = load_json(STATS_FILE, {
+        "totalSearches": 0,
+        "totalGrabs": 0,
+        "searchesBySource": {},
+        "topSearches": [],
+        "grabsByCategory": {},
+        "lastUpdated": None
+    })
+    
+    if search_term:
+        stats["totalSearches"] += 1
+        # Track top searches
+        top = stats.get("topSearches", [])
+        found = False
+        for item in top:
+            if item["term"] == search_term:
+                item["count"] += 1
+                found = True
+                break
+        if not found:
+            top.append({"term": search_term, "count": 1})
+        top.sort(key=lambda x: x["count"], reverse=True)
+        stats["topSearches"] = top[:50]
+    
+    if source:
+        stats["searchesBySource"][source] = stats["searchesBySource"].get(source, 0) + 1
+    
+    if grab:
+        stats["totalGrabs"] += 1
+        if category:
+            cat_str = str(category)
+            stats["grabsByCategory"][cat_str] = stats["grabsByCategory"].get(cat_str, 0) + 1
+    
+    stats["lastUpdated"] = datetime.utcnow().isoformat()
+    save_json(STATS_FILE, stats)
