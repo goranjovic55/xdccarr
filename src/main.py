@@ -158,7 +158,16 @@ async def search_xdcc(query: str, limit: int = 100) -> list:
                     uid = hashlib.md5(f"{server}{channel}{bot}{pack}".encode()).hexdigest()[:16]
                     
                     # Build xdcc:// link
-                    xdcc_link = f"xdcc://{server}/{channel}/{bot}/{pack}"
+                    # Store in cache for grab endpoint
+                    _result_cache[uid] = {
+                        "server": server,
+                        "channel": channel, 
+                        "bot": bot,
+                        "pack": pack,
+                        "filename": filename
+                    }
+                    # Use HTTP grab URL for Prowlarr compatibility
+                    grab_url = f"http://localhost:9117/grab?id={uid}"
                     
                     results.append({
                         "id": uid,
@@ -172,7 +181,7 @@ async def search_xdcc(query: str, limit: int = 100) -> list:
                         "pack": pack,
                         "xdcc_cmd": xdcc_cmd,
                         "category": detect_category(filename),
-                        "link": xdcc_link,
+                        "link": grab_url,
                         "pubdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
                     })
                     
@@ -312,3 +321,46 @@ async def api_grab(item: dict):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9117)
+
+# In-memory cache for grab lookups
+_result_cache = {}
+
+@app.get("/grab")
+async def grab(id: str = Query(..., description="Result ID to grab")):
+    """
+    Trigger XDCC download for a result.
+    Called by Prowlarr when user clicks download.
+    """
+    import subprocess
+    
+    if id not in _result_cache:
+        return {"status": "error", "message": "Result not found or expired"}
+    
+    item = _result_cache[id]
+    
+    # Build irssi command
+    server = item.get("server", "")
+    channel = item.get("channel", "")
+    bot = item.get("bot", "")
+    pack = item.get("pack", "")
+    
+    if not all([server, bot, pack]):
+        return {"status": "error", "message": "Missing XDCC details"}
+    
+    # Create XDCC command file for irssi
+    xdcc_cmd = f"/msg {bot} xdcc send #{pack}"
+    
+    # Option 1: Write to blackhole as .xdcc file (custom handler)
+    # Option 2: Trigger via SSH to DietPi irssi
+    # Option 3: Use HTTP API if autodl-irssi has one
+    
+    # For now, write to a queue file that the daemon can pick up
+    queue_file = "/tmp/xdcc_queue.txt"
+    with open(queue_file, "a") as f:
+        f.write(f"{server}|{channel}|{bot}|{pack}|{item.get('filename', '')}\n")
+    
+    return {
+        "status": "queued",
+        "message": f"XDCC download queued: {bot} #{pack}",
+        "details": item
+    }
