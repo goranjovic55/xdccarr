@@ -3,6 +3,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Sidebar } from './components/Sidebar';
 import { SearchPage } from './pages/Search';
 import { ActivityPage } from './pages/Activity';
+import { HistoryPage } from './pages/History';
+import { StatsPage } from './pages/Stats';
+import { SettingsPage } from './pages/Settings';
 
 const queryClient = new QueryClient();
 
@@ -16,9 +19,9 @@ function App() {
             <Routes>
               <Route path="/" element={<SearchPage />} />
               <Route path="/activity" element={<ActivityPage />} />
-              <Route path="/history" element={<div>History - Coming Soon</div>} />
-              <Route path="/stats" element={<div>Stats - Coming Soon</div>} />
-              <Route path="/settings" element={<div>Settings - Coming Soon</div>} />
+              <Route path="/history" element={<HistoryPage />} />
+              <Route path="/stats" element={<StatsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </main>
         </div>
